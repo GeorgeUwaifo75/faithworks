@@ -10,7 +10,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
 
-   <script src="config.js"></script>
+   <script src="config2.js"></script>
 
 </head>
 <body>
@@ -186,7 +186,28 @@
               <option value="closed">Closed (Members Only)</option>
             </select>
           </div>
-        </div>
+
+          <!-- ═══════════════════════════════════════════════
+               NEW — Church Type selector
+               Determines whether this church account is a
+               Head Church or a Branch Church. This value is
+               saved as churchType: 'head' | 'branch' and is
+               used to group churches in all dropdowns seen by
+               General Users and Sellers during sign-up.
+               ═══════════════════════════════════════════════ -->
+          <div class="form-group">
+            <label>Church Type <span class="required-star">*</span></label>
+            <select id="regChurchType">
+              <option value="">-- Select Church Type --</option>
+              <option value="head">🏛 Head Church</option>
+              <option value="branch">🌿 Branch Church</option>
+            </select>
+            <small style="color:var(--gray);font-size:.78rem;margin-top:4px;display:block;">
+              Select whether this is a Head (main) or Branch (satellite) church.
+            </small>
+          </div>
+
+        </div><!-- /merchantFields -->
 
         <button class="btn-primary full-width" onclick="doSignup()">
           <i class="fas fa-user-plus"></i> Create Account
