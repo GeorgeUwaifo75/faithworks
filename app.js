@@ -356,6 +356,11 @@ async function doSignup() {
   if (pass !== passConfirm) return setErr('signupError', 'Passwords do not match.');
   if (type === 2 && !el('regChurch').value) return setErr('signupError', 'Sellers must select a Church.');
 
+  // ── NEW: Merchant/Church type validation ──────────────────
+  if (type === 1 && !el('regChurchType').value) {
+    return setErr('signupError', 'Please select whether this is a Head Church or Branch Church.');
+  }
+
   await dbRead(true);
   if (DB.users.find(u => u.userId === uid)) return setErr('signupError', 'User ID already taken.');
 
@@ -399,6 +404,8 @@ async function doSignup() {
     newUser.accessMode    = el('regAccess').value;
     newUser.commissionPct = 10;
     newUser.active        = false;   // merchants need superadmin approval
+    // ── NEW: save church type (head / branch) ──────────────
+    newUser.churchType    = el('regChurchType').value || 'head';
   }
 
   await dbTransaction(db => db.users.push(newUser));
@@ -460,8 +467,10 @@ function doLogout() {
     const inp = el(id); if (inp) { try { inp.value = ''; } catch(_) {} }
   });
 
-  const signupType = el('signupType'); if (signupType) signupType.value = '3';
-  const regAccess  = el('regAccess');  if (regAccess)  regAccess.value  = 'open';
+  const signupType   = el('signupType');   if (signupType)   signupType.value   = '3';
+  const regAccess    = el('regAccess');    if (regAccess)    regAccess.value    = 'open';
+  // ── NEW: reset church-type selector on logout ────────────
+  const regChurchType = el('regChurchType'); if (regChurchType) regChurchType.value = '';
 
   ['loginError','signupError'].forEach(id => {
     const e = el(id); if (e) { e.textContent = ''; e.style.color = ''; }
@@ -751,7 +760,7 @@ function renderJobList(containerId, jobs) {
           <p>${escHtml(j.description).substring(0, 80)}…</p>
           <div class="job-meta">
             <span class="tag">${catObj.icon} ${catObj.name}</span>
-            <span class="tag">${escHtml(church.churchName || church.userId || '')}</span>
+            <span class="tag">${escHtml(church.user_group === 1 ? churchDisplayName(church) : (church.churchName || church.userId || ''))}</span>
             ${j.scope === 'global'
               ? '<span class="tag tag-orange">🌍 Public</span>'
               : '<span class="tag">🏛 Local</span>'}
@@ -773,15 +782,71 @@ function populateCategoryFilters() {
   if (jc) jc.innerHTML = opts;
 }
 
+/**
+ * Return the display label for a church/merchant user object.
+ *
+ * — Head churches  : "Church Name"
+ * — Branch churches: "Church Name (First Two Address Words)"
+ *
+ * The address suffix helps users instantly distinguish between
+ * branches of the same church (e.g. "Grace Chapel (Ikeja Lagos)"
+ * vs "Grace Chapel (Lekki Phase)").
+ *
+ * Backward-compatible: accounts with no churchType default to
+ * 'head', and accounts with no address show no parenthetical.
+ *
+ * @param  {Object} c  — a DB user object (user_group === 1)
+ * @returns {string}   — plain text display label (not HTML-escaped)
+ */
+function churchDisplayName(c) {
+  const base = c.churchName || c.userId || '';
+  if ((c.churchType || 'head') !== 'branch') return base;
+
+  // Extract up to the first 2 words of the address for the suffix
+  const addr = (c.address || '').trim();
+  if (!addr) return base;
+
+  const words = addr.split(/\s+/).filter(Boolean);
+  const suffix = words.slice(0, 2).join(' ');
+  return suffix ? `${base} (${suffix})` : base;
+}
+
+/**
+ * Populate all church-selection dropdowns.
+ * — Sign-up form  (regChurch)  : groups churches by Head / Branch
+ * — Browse filter (filterChurch): groups by Head / Branch
+ * — Branch church options include a short address suffix in
+ *   parentheses so users can distinguish between branches.
+ * — Already-registered accounts without churchType default to "head"
+ *   so existing data continues to work without any migration.
+ */
 function populateChurchDropdowns() {
   const churches = (DB.users || []).filter(u => u.user_group === 1 && u.active);
-  const opts = churches.map(c =>
-    `<option value="${c.userId}">${escHtml(c.churchName || c.userId)}</option>`
-  ).join('');
+
+  // Separate into head and branch, defaulting old records to 'head'
+  const headChurches   = churches.filter(c => (c.churchType || 'head') === 'head');
+  const branchChurches = churches.filter(c => c.churchType === 'branch');
+
+  /* ── Helper: build <optgroup> HTML for one set of churches ── */
+  function buildOptgroup(label, list) {
+    if (!list.length) return '';
+    const options = list.map(c =>
+      `<option value="${c.userId}">${escHtml(churchDisplayName(c))}</option>`
+    ).join('');
+    return `<optgroup label="${label}">${options}</optgroup>`;
+  }
+
+  const groupedOpts =
+    buildOptgroup('🏛 Head Churches', headChurches) +
+    buildOptgroup('🌿 Branch Churches', branchChurches);
+
+  // Browse filter
   const fc = el('filterChurch');
-  if (fc) fc.innerHTML = '<option value="">All Churches</option>' + opts;
+  if (fc) fc.innerHTML = '<option value="">All Churches</option>' + groupedOpts;
+
+  // Sign-up church selector (for General Users & Sellers)
   const rc = el('regChurch');
-  if (rc) rc.innerHTML = '<option value="">-- Select a Church --</option>' + opts;
+  if (rc) rc.innerHTML = '<option value="">-- Select a Church --</option>' + groupedOpts;
 }
 
 
@@ -797,44 +862,38 @@ function openJobDetail(jobId) {
   const catObj   = CATEGORIES.find(c => c.id === j.category) || { icon: '🌟', name: j.category };
   const photos   = (j.photos || []).filter(Boolean).slice(0, 4);
   const photoHtml = photos.length
-    ? `<div class="job-detail-photos">${photos.map(p =>
-        `<img src="${p}" alt="" onerror="this.style.display='none'"/>`).join('')}</div>`
+    ? photos.map(p => `<img src="${p}" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:8px;" alt=""/>`).join('')
     : '';
-  const sellerAvatar = seller.picture
-    ? `<img src="${seller.picture}" alt=""/>`
-    : (seller.userId || 'U')[0].toUpperCase();
-  const canChat = currentUser.user_group === 3 ||
-    (currentUser.user_group === 2 && currentUser.userId !== j.sellerId);
+
+  const g = currentUser.user_group;
+  const canContact =
+    (g === 3 || g === 2) &&
+    j.sellerId !== currentUser.userId;
 
   el('jobDetailContent').innerHTML = `
     ${photoHtml}
-    <h2 class="job-detail-title">${escHtml(j.title)}</h2>
-    <div class="job-detail-meta">
+    <h3 style="margin-bottom:8px;">${escHtml(j.title)}</h3>
+    <div class="job-meta" style="margin-bottom:12px;">
       <span class="tag">${catObj.icon} ${catObj.name}</span>
-      <span class="status-badge status-${j.status}">${j.status}</span>
-      ${j.scope === 'global' ? '<span class="tag tag-orange">🌍 Public</span>' : ''}
-      <span class="job-price">₦${Number(j.price || 0).toLocaleString()}</span>
+      <span class="tag">🏛 ${escHtml(church.user_group === 1 ? churchDisplayName(church) : (church.churchName || church.userId || ''))}</span>
+      ${j.scope === 'global'
+        ? '<span class="tag tag-orange">🌍 Public</span>'
+        : '<span class="tag">🏛 Local</span>'}
     </div>
-    <p class="job-detail-desc">${escHtml(j.description)}</p>
-    <p style="color:var(--gray);font-size:.85rem;margin-bottom:12px;">
-      <i class="fas fa-clock"></i> ${escHtml(j.availability || 'Flexible')}
-    </p>
-    <div class="seller-info-row">
-      <div class="seller-avatar">${sellerAvatar}</div>
-      <div>
-        <div style="font-weight:600">${escHtml(seller.userId || '')}</div>
-        <div style="font-size:.8rem;color:var(--gray)">
-          ${escHtml(church.churchName || '')} ${seller.branch ? '• ' + seller.branch : ''}
-        </div>
-        <div style="font-size:.82rem">${'⭐'.repeat(Math.round(avgRating))} (${avgRating.toFixed(1)})</div>
-      </div>
+    <p style="margin-bottom:12px;">${escHtml(j.description)}</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <div><strong>Price</strong><br/>₦${Number(j.price || 0).toLocaleString()}</div>
+      <div><strong>Availability</strong><br/>${escHtml(j.availability || 'Not specified')}</div>
+      <div><strong>Seller</strong><br/>${escHtml(j.sellerId)}</div>
+      <div><strong>Rating</strong><br/>${'⭐'.repeat(Math.round(avgRating))} (${avgRating.toFixed(1)})</div>
     </div>
-    ${canChat
-      ? `<button class="btn-primary" onclick="startChat('${j.sellerId}','${j.jobId}')">
+    ${canContact
+      ? `<button class="btn-primary full-width" onclick="startChat('${j.sellerId}','${j.jobId}')">
            <i class="fas fa-comment-dots"></i> Contact Seller
          </button>`
       : ''}
   `;
+
   el('jobModal').classList.remove('hidden');
   el('jobModal').style.display = 'flex';
 }
@@ -846,161 +905,113 @@ function closeJobModal() {
 
 
 /* ═══════════════════════════════════════════════════════════
-   MY LISTINGS (Seller)
+   MY JOBS (Seller listings)
    ═══════════════════════════════════════════════════════════ */
 function renderMyJobs() {
-  if (!DB || !DB.jobs) { setTimeout(renderMyJobs, 200); return; }
+  if (!DB) { setTimeout(renderMyJobs, 200); return; }
   _doRenderMyJobs();
 }
 
 function _doRenderMyJobs() {
-  const jobs = (DB.jobs || []).filter(j => j.sellerId === currentUser.userId);
-  const c    = el('myJobsList');
+  const myJobs = (DB.jobs || []).filter(j => j.sellerId === currentUser.userId);
+  const c = el('myJobsList');
   if (!c) return;
-  if (!jobs.length) {
-    c.innerHTML = `<div class="empty-state"><i class="fas fa-plus-circle"></i>
-      <p>No listings yet. Create your first one!</p></div>`;
+  if (!myJobs.length) {
+    c.innerHTML = `<div class="empty-state"><i class="fas fa-briefcase"></i><p>No listings yet. <a href="#" onclick="showSection('newJob')">Create one!</a></p></div>`;
     return;
   }
-  c.innerHTML = jobs.map(j => {
-    const catObj = CATEGORIES.find(ct => ct.id === j.category) || { icon: '🌟', name: j.category };
-    const thumb  = (j.photos && j.photos[0])
-      ? `<img src="${j.photos[0]}" alt=""/>`
-      : `<i class="fas fa-briefcase"></i>`;
+  c.innerHTML = myJobs.map(j => {
+    const catObj = CATEGORIES.find(cat => cat.id === j.category) || { icon: '🌟', name: j.category };
     return `
       <div class="job-item">
-        <div class="job-thumb">${thumb}</div>
+        <div class="job-thumb"><i class="fas fa-briefcase"></i></div>
         <div class="job-info">
           <h4>${escHtml(j.title)}</h4>
           <div class="job-meta">
             <span class="tag">${catObj.icon} ${catObj.name}</span>
             <span class="status-badge status-${j.status}">${j.status}</span>
+            ${j.scope === 'global' ? '<span class="tag tag-orange">🌍 Public</span>' : '<span class="tag">🏛 Local</span>'}
           </div>
-          <p style="font-size:.8rem;color:var(--gray);margin-top:4px;">
-            ${escHtml(j.description).substring(0, 60)}…
-          </p>
         </div>
         <div>
           <div class="job-price">₦${Number(j.price || 0).toLocaleString()}</div>
-          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
-            ${j.status === 'approved'
-              ? `<button class="btn-orange" onclick="openJobDetail('${j.jobId}')">View</button>`
-              : ''}
-            <button class="btn-secondary" style="padding:6px 12px;font-size:.82rem;" onclick="openEditJob('${j.jobId}')">
-              <i class="fas fa-edit"></i> Edit
-            </button>
-          </div>
+          <button class="btn-secondary" style="font-size:.75rem;margin-top:6px;"
+            onclick="openEditJob('${j.jobId}')"><i class="fas fa-edit"></i> Edit</button>
         </div>
       </div>`;
   }).join('');
 }
 
-
-/* ═══════════════════════════════════════════════════════════
-   NEW JOB
-   ═══════════════════════════════════════════════════════════ */
 function initNewJob() {
-  const jc = el('jobCategory');
-  if (jc) jc.innerHTML = CATEGORIES.map(c =>
-    `<option value="${c.id}">${c.icon} ${c.name}</option>`).join('');
-  setErr('jobError', '');
+  // category select is already populated in bootApp
 }
 
 async function submitJob() {
-  const title = el('jobTitle').value.trim();
-  const cat   = el('jobCategory').value;
-  const desc  = el('jobDesc').value.trim();
-  const price = el('jobPrice').value;
-  const avail = el('jobAvail').value.trim();
-  const scope = el('jobScope').value;
+  const title  = el('jobTitle').value.trim();
+  const cat    = el('jobCategory').value;
+  const desc   = el('jobDesc').value.trim();
+  const price  = el('jobPrice').value;
+  const avail  = el('jobAvail').value.trim();
+  const scope  = el('jobScope').value;
+  const photos = el('jobPhotos');
 
   if (!title || !cat || !desc) return setErr('jobError', 'Please fill required fields.');
-  if (!currentUser.churchId)   return setErr('jobError', 'No church linked to your account.');
+  if (!currentUser.churchId)   return setErr('jobError', 'Your account has no church linked.');
 
-  // Upload photos from file input
-  const photosInput = el('jobPhotos');
-  let photos = [];
-  if (photosInput && photosInput.files && photosInput.files.length) {
-    const statusEl = el('jobPhotosStatus');
-    if (statusEl) statusEl.textContent = 'Uploading photos…';
-    const submitBtn = document.querySelector('#sec-newJob .btn-primary');
-    if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading…'; }
-    try {
-      for (const file of Array.from(photosInput.files).slice(0, 4)) {
-        const url = await uploadImageToFirebase(
-          file, `faithworks/jobs/${currentUser.userId}_${Date.now()}_${file.name}`);
-        photos.push(url);
-      }
-    } catch (e) {
-      console.error('Photo upload error:', e);
-      setErr('jobError', 'Photo upload failed. Please try again.');
-      if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = 'Submit for Approval'; }
-      if (statusEl) statusEl.textContent = '';
-      return;
-    }
-    if (statusEl) statusEl.textContent = `${photos.length} photo(s) uploaded.`;
-    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = 'Submit for Approval'; }
+  const merchant = DB.users.find(u => u.userId === currentUser.churchId && u.user_group === 1);
+  if (!merchant)               return setErr('jobError', 'Your church could not be found.');
+
+  const extraFee = scope === 'global';
+  let photoUrls = '';
+  if (photos && photos.files && photos.files.length) {
+    setErr('jobError', 'Uploading photos…', false);
+    photoUrls = await uploadJobPhotos(photos);
   }
-  const job = {
-    jobId        : genId('job'),
+  setErr('jobError', '', false);
+
+  const newJob = {
+    jobId       : genId('job'),
     title, category: cat, description: desc,
-    price        : parseFloat(price) || 0,
-    availability : avail, scope, photos,
-    sellerId     : currentUser.userId,
-    merchantId   : currentUser.churchId,
-    status       : 'pending',
-    createdAt    : new Date().toISOString(),
-    updatedAt    : new Date().toISOString(),
-    extraFeeApplied: scope === 'global',
+    price       : parseFloat(price) || 0,
+    availability: avail,
+    scope,
+    extraFeeApplied: extraFee,
+    photos      : photoUrls ? photoUrls.split(', ').filter(Boolean) : [],
+    sellerId    : currentUser.userId,
+    merchantId  : currentUser.churchId,
+    status      : 'pending',
+    createdAt   : new Date().toISOString(),
   };
 
-  try {
-    await dbTransaction(db => db.jobs.push(job));
-    addNotification(currentUser.churchId,
-      `New job listing pending approval: "${title}" by ${currentUser.userId}`);
-    // Email notification to the Merchant administrator
-    const merchant = DB.users.find(u => u.userId === currentUser.churchId && u.user_group === 1);
-    if (merchant && merchant.email) {
-      sendNewListingEmailAlert(merchant.email, merchant.churchName || merchant.userId,
-        currentUser.userId, title, cat);
-    }
-    setErr('jobError', '✅ Listing submitted for approval!', false);
-    setTimeout(() => showSection('myJobs'), 1500);
-  } catch (e) {
-    setErr('jobError', 'Error submitting listing. Please try again.');
+  await dbTransaction(db => db.jobs.push(newJob));
+
+  addNotification(currentUser.churchId,
+    `New listing "${title}" submitted by ${currentUser.userId} — awaiting approval.`);
+  if (merchant.email) {
+    sendNewListingEmailAlert(merchant.email, merchant.churchName || merchant.userId,
+      currentUser.userId, title, cat);
   }
+
+  setErr('jobError', '✅ Listing submitted for approval!', false);
+  setTimeout(() => { setErr('jobError', '', false); showSection('myJobs'); }, 1800);
 }
 
-
-/* ═══════════════════════════════════════════════════════════
-   EDIT JOB (Seller)
-   ═══════════════════════════════════════════════════════════ */
 function openEditJob(jobId) {
   const j = DB.jobs.find(j => j.jobId === jobId);
   if (!j) return;
 
-  // Populate category dropdown
-  const ec = el('editJobCategory');
-  if (ec) ec.innerHTML = CATEGORIES.map(c =>
-    `<option value="${c.id}" ${c.id === j.category ? 'selected' : ''}>${c.icon} ${c.name}</option>`
+  const catOpts = CATEGORIES.map(c =>
+    `<option value="${c.id}" ${j.category === c.id ? 'selected' : ''}>${c.icon} ${c.name}</option>`
   ).join('');
+  el('editJobCategory').innerHTML = catOpts;
 
   el('editJobId').value    = j.jobId;
   el('editJobTitle').value = j.title;
   el('editJobDesc').value  = j.description;
-  el('editJobPrice').value = j.price || '';
+  el('editJobPrice').value = j.price;
   el('editJobAvail').value = j.availability || '';
   el('editJobScope').value = j.scope || 'local';
 
-  const statusEl = el('editJobPhotosStatus');
-  if (statusEl) {
-    const existing = (j.photos || []).filter(Boolean).length;
-    statusEl.textContent = existing
-      ? `${existing} existing photo(s). Upload new files to replace them.`
-      : 'No photos uploaded yet.';
-  }
-
-  setErr('editJobError', '');
   el('editJobModal').classList.remove('hidden');
   el('editJobModal').style.display = 'flex';
 }
@@ -1018,37 +1029,21 @@ async function saveEditJob() {
   const price = el('editJobPrice').value;
   const avail = el('editJobAvail').value.trim();
   const scope = el('editJobScope').value;
+  const photoInput = el('editJobPhotos');
 
   if (!title || !cat || !desc) return setErr('editJobError', 'Please fill required fields.');
 
-  const j = DB.jobs.find(j => j.jobId === jobId);
-  if (!j) return setErr('editJobError', 'Listing not found.');
-  if (j.sellerId !== currentUser.userId) return setErr('editJobError', 'Unauthorised.');
+  const saveBtn = document.querySelector('#editJobModal .btn-primary');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…'; }
 
-  // Handle optional photo replacement
-  const photosInput  = el('editJobPhotos');
-  let newPhotos      = j.photos || [];
-  if (photosInput && photosInput.files && photosInput.files.length) {
-    const statusEl  = el('editJobPhotosStatus');
-    const saveBtn   = document.querySelector('#editJobModal .btn-primary');
-    if (statusEl) statusEl.textContent = 'Uploading photos…';
-    if (saveBtn)  { saveBtn.disabled = true; saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading…'; }
-    try {
-      newPhotos = [];
-      for (const file of Array.from(photosInput.files).slice(0, 4)) {
-        const url = await uploadImageToFirebase(
-          file, `faithworks/jobs/${currentUser.userId}_${Date.now()}_${file.name}`);
-        newPhotos.push(url);
-      }
-      if (statusEl) statusEl.textContent = `${newPhotos.length} photo(s) uploaded.`;
-    } catch (e) {
-      console.error('Photo upload error during edit:', e);
-      setErr('editJobError', 'Photo upload failed. Changes not saved.');
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
-      return;
-    }
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
+  let newPhotos = null;
+  if (photoInput && photoInput.files && photoInput.files.length) {
+    setErr('editJobError', 'Uploading new photos…', false);
+    const urlStr = await uploadJobPhotos(photoInput);
+    newPhotos = urlStr ? urlStr.split(', ').filter(Boolean) : [];
   }
+
+  if (saveBtn) { saveBtn.disabled = false; saveBtn.innerHTML = '<i class="fas fa-save"></i> Save Changes'; }
 
   try {
     await dbTransaction(db => {
@@ -1060,7 +1055,7 @@ async function saveEditJob() {
       job.price         = parseFloat(price) || 0;
       job.availability  = avail;
       job.scope         = scope;
-      job.photos        = newPhotos;
+      job.photos        = newPhotos !== null ? newPhotos : job.photos;
       job.extraFeeApplied = scope === 'global';
       job.updatedAt     = new Date().toISOString();
       // Re-set to pending so the merchant can re-approve the edited listing
@@ -1199,75 +1194,176 @@ async function startChat(sellerId, jobId) {
 async function sendChatMsg() {
   const text = el('chatInput').value.trim();
   if (!text || !activeChatId) return;
-  const chat  = DB.chats.find(c => c.chatId === activeChatId);
+  const chat = DB.chats.find(c => c.chatId === activeChatId);
   if (!chat) return;
   const other = chat.participants.find(p => p !== currentUser.userId);
-  const msg   = {
-    msgId : genId('msg'), from: currentUser.userId, to: other,
-    text, sentAt: new Date().toISOString(), read: false,
+  const msg = {
+    msgId  : genId('msg'),
+    from   : currentUser.userId,
+    to     : other,
+    text,
+    sentAt : new Date().toISOString(),
+    read   : false,
   };
-  el('chatInput').value = '';
   await dbTransaction(db => {
     const c = db.chats.find(c => c.chatId === activeChatId);
     if (c) { c.messages.push(msg); c.lastUpdated = new Date().toISOString(); }
   });
-  addNotification(other, `New message from ${currentUser.userId}: "${text.substring(0, 40)}…"`);
-  const otherUser = DB.users.find(u => u.userId === other);
-  if (otherUser) sendEmailAlert(otherUser.email, other, currentUser.userId, chat.jobId);
+  el('chatInput').value = '';
   openChat(activeChatId);
+
+  const otherUser = DB.users.find(u => u.userId === other);
+  if (otherUser && otherUser.email) {
+    sendChatEmailAlert(otherUser.email, otherUser.userId, currentUser.userId, text);
+  }
 }
 
 async function markJobDone(chatId, role) {
   await dbTransaction(db => {
     const c = db.chats.find(c => c.chatId === chatId);
-    if (!c) return;
-    if (role === 'seller') c.sellerConfirmed = true;
-    if (role === 'user')   c.userConfirmed   = true;
-    if (c.sellerConfirmed && c.userConfirmed) {
-      c.jobCompleted = true;
-      const job = db.jobs.find(j => j.jobId === c.jobId);
-      if (job) {
-        const merchant    = db.users.find(u => u.userId === job.merchantId);
-        const merchantPct = (merchant && merchant.commissionPct) || 10;
-        const base        = parseFloat(job.price) || 0;
-        const extra       = job.extraFeeApplied ? base * 0.2 : 0;
-        const total       = base + extra;
-        db.payments.push({
-          paymentId   : genId('pay'), type: 'service',
-          sellerId    : job.sellerId, merchantId: job.merchantId,
-          jobId       : c.jobId,     amount: total,
-          merchantShare: total * (merchantPct / 100),
-          status      : 'pending',   createdAt: new Date().toISOString(),
-        });
-      }
+    if (c) {
+      if (!c.doneBy) c.doneBy = {};
+      c.doneBy[role] = true;
+      if (c.doneBy.seller && c.doneBy.user) c.jobCompleted = true;
     }
   });
   openChat(chatId);
 }
 
-function sendEmailAlert(toEmail, toName, fromUser, jobId) {
-  if (typeof emailjs === 'undefined') return;
-  const job = DB.jobs.find(j => j.jobId === jobId) || {};
-  emailjs.send(CONFIG.EMAILJS_SERVICE, CONFIG.EMAILJS_TEMPLATE_CHAT, {
-    to_email : toEmail, to_name: toName, from_user: fromUser,
-    job_title: job.title || '',
-    message  : `New message/contact on FaithWorks re: "${job.title || 'a job'}". Login to respond.`,
-  }).catch(console.error);
-}
 
-/**
- * Notify a Merchant administrator by email when a seller submits a new listing.
- */
-function sendNewListingEmailAlert(toEmail, toName, sellerUserId, listingTitle, category) {
+/* ═══════════════════════════════════════════════════════════
+   EMAIL ALERTS (EmailJS)
+   ═══════════════════════════════════════════════════════════ */
+function sendEmailAlert(toEmail, toName, fromId, jobId) {
   if (typeof emailjs === 'undefined') return;
-  const catObj = CATEGORIES.find(c => c.id === category) || { name: category };
+  const job = (DB.jobs || []).find(j => j.jobId === jobId);
   emailjs.send(CONFIG.EMAILJS_SERVICE, CONFIG.EMAILJS_TEMPLATE_CHAT, {
     to_email : toEmail,
     to_name  : toName,
-    from_user: sellerUserId,
-    job_title: listingTitle,
-    message  : `A new service listing "${listingTitle}" (${catObj.name}) has been submitted by ${sellerUserId} and is awaiting your approval. Please log in to your FaithWorks Church Panel to review it.`,
-  }).catch(console.error);
+    from_name: fromId,
+    message  : `You have a new contact request on FaithWorks regarding: "${job ? job.title : jobId}".`,
+  }).catch(e => console.warn('EmailJS error:', e));
+}
+
+function sendChatEmailAlert(toEmail, toName, fromId, msgText) {
+  if (typeof emailjs === 'undefined') return;
+  emailjs.send(CONFIG.EMAILJS_SERVICE, CONFIG.EMAILJS_TEMPLATE_CHAT, {
+    to_email : toEmail,
+    to_name  : toName,
+    from_name: fromId,
+    message  : msgText,
+  }).catch(e => console.warn('EmailJS error:', e));
+}
+
+function sendNewListingEmailAlert(toEmail, toName, sellerId, jobTitle, category) {
+  if (typeof emailjs === 'undefined') return;
+  emailjs.send(CONFIG.EMAILJS_SERVICE, CONFIG.EMAILJS_TEMPLATE_CHAT, {
+    to_email : toEmail,
+    to_name  : toName,
+    from_name: sellerId,
+    message  : `A new listing "${jobTitle}" (${category}) has been submitted for your approval on FaithWorks.`,
+  }).catch(e => console.warn('EmailJS error:', e));
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   ADMIN PANEL (user_group 0 or 1 acting as local admin)
+   ═══════════════════════════════════════════════════════════ */
+function adminTab(tab) {
+  if (!DB) { setTimeout(() => adminTab(tab), 150); return; }
+
+  document.querySelectorAll('#sec-adminPanel .tab-btn').forEach((b, i) => {
+    b.classList.toggle('active', ['pendingJobs','sellers','payments'][i] === tab);
+  });
+
+  const c = el('adminContent');
+  if (!c) return;
+
+  if (tab === 'pendingJobs') {
+    const pending = DB.jobs.filter(j => j.status === 'pending');
+    c.innerHTML = pending.length ? `
+      <div class="admin-table-wrap"><table class="admin-table">
+        <thead><tr><th>Title</th><th>Seller</th><th>Church</th><th>Scope</th><th>Actions</th></tr></thead>
+        <tbody>${pending.map(j => {
+          const church = DB.users.find(u => u.userId === j.merchantId) || {};
+          return `
+          <tr>
+            <td>${escHtml(j.title)}</td>
+            <td>${escHtml(j.sellerId)}</td>
+            <td>${escHtml(church.churchName || j.merchantId)}</td>
+            <td>${j.scope === 'global' ? '🌍 Public' : '🏛 Local'}</td>
+            <td class="action-btns">
+              <button class="btn-success" onclick="approveJob('${j.jobId}');adminTab('pendingJobs')">Approve</button>
+              <button class="btn-danger"  onclick="rejectJob('${j.jobId}');adminTab('pendingJobs')">Reject</button>
+            </td>
+          </tr>`;
+        }).join('')}
+        </tbody></table></div>`
+    : '<div class="empty-state"><i class="fas fa-check-circle"></i><p>No pending jobs.</p></div>';
+
+  } else if (tab === 'sellers') {
+    const sellers = (DB.users || []).filter(u => u.user_group === 2);
+    c.innerHTML = sellers.length ? `
+      <div class="admin-table-wrap"><table class="admin-table">
+        <thead><tr><th>User ID</th><th>Email</th><th>Church</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${sellers.map(u => {
+          const church = DB.users.find(m => m.userId === u.churchId && m.user_group === 1) || {};
+          return `
+          <tr>
+            <td>${escHtml(u.userId)}</td>
+            <td>${escHtml(u.email||'')}</td>
+            <td>${escHtml(church.userId ? churchDisplayName(church) : (u.churchId || '—'))}</td>
+            <td><span class="status-badge status-${u.active?'active':'inactive'}">${u.active?'Active':'Inactive'}</span></td>
+            <td><button class="btn-${u.active?'danger':'success'}"
+              onclick="toggleUserActive('${u.userId}', () => adminTab('sellers'))">${u.active?'Deactivate':'Activate'}</button></td>
+          </tr>`;
+        }).join('')}
+        </tbody></table></div>`
+    : '<div class="empty-state"><i class="fas fa-users"></i><p>No sellers found.</p></div>';
+
+  } else if (tab === 'payments') {
+    renderPaymentsTable('adminContent', currentUser.user_group === 1 ? currentUser.userId : null);
+  }
+}
+
+async function approveJob(jobId) {
+  await dbTransaction(db => {
+    const j = db.jobs.find(j => j.jobId === jobId);
+    if (j) { j.status = 'approved'; j.approvedAt = new Date().toISOString(); }
+  });
+  const job = DB.jobs.find(j => j.jobId === jobId);
+  if (job) addNotification(job.sellerId, `Your listing "${job.title}" has been approved!`);
+}
+
+async function rejectJob(jobId) {
+  await dbTransaction(db => {
+    const j = db.jobs.find(j => j.jobId === jobId);
+    if (j) { j.status = 'rejected'; j.rejectedAt = new Date().toISOString(); }
+  });
+  const job = DB.jobs.find(j => j.jobId === jobId);
+  if (job) addNotification(job.sellerId, `Your listing "${job.title}" was not approved.`);
+}
+
+async function toggleUserActive(userId, callback) {
+  await dbTransaction(db => {
+    const u = db.users.find(u => u.userId === userId);
+    if (u) u.active = !u.active;
+  });
+  if (callback) callback();
+}
+
+function updateBadges() {
+  if (!DB || !currentUser) return;
+  const uid    = currentUser.userId;
+  const unread = (DB.chats || []).reduce((acc, c) =>
+    acc + (c.messages || []).filter(m => m.to === uid && !m.read).length, 0);
+  const notifs = (DB.notifications || []).filter(n => n.userId === uid && !n.read).length;
+
+  const cb = el('chatBadge');
+  const nb = el('notifBadge');
+  if (cb) { cb.textContent = unread; cb.classList.toggle('hidden', unread === 0); }
+  if (nb) { nb.textContent = notifs; nb.classList.toggle('hidden', notifs === 0); }
+  syncBottomNavBadges();
 }
 
 
@@ -1354,12 +1450,19 @@ function renderProfile() {
     ? `<img src="${u.picture}" alt=""/>`
     : (u.userId[0] || 'U').toUpperCase();
 
+  // ── NEW: church-type badge for Merchant accounts ─────────
+  const churchTypeLabel = g === 1
+    ? `<span class="tag" style="background:${(u.churchType || 'head') === 'head' ? 'var(--blue)' : 'var(--orange)'};color:#fff;margin-left:6px;">
+         ${(u.churchType || 'head') === 'head' ? '🏛 Head Church' : '🌿 Branch Church'}
+       </span>`
+    : '';
+
   el('profileCard').innerHTML = `
     <div class="profile-header">
       <div class="profile-big-avatar">${avatarContent}</div>
       <div>
         <h3>${escHtml(u.userId)}</h3>
-        <span class="tag">${labels[g] || 'User'}</span>
+        <span class="tag">${labels[g] || 'User'}</span>${churchTypeLabel}
         ${u.email ? `<p style="color:var(--gray);font-size:.85rem;margin-top:4px;">${escHtml(u.email)}</p>` : ''}
       </div>
     </div>
@@ -1477,126 +1580,6 @@ function renderNotifications() {
   dbTransaction(db => {
     db.notifications.filter(n => n.userId === currentUser.userId).forEach(n => n.read = true);
   });
-  updateBadges();
-}
-
-function updateBadges() {
-  if (!DB || !currentUser) return;
-  const uid          = currentUser.userId;
-  const unreadNotifs = (DB.notifications || []).filter(n => n.userId === uid && !n.read).length;
-  const unreadChats  = (DB.chats || []).reduce((acc, c) => {
-    if (!c.participants.includes(uid)) return acc;
-    return acc + c.messages.filter(m => m.to === uid && !m.read).length;
-  }, 0);
-
-  // For Merchant accounts (user_group === 1), add the count of pending listing
-  // approvals to the notification bell so it lights up without delay.
-  let pendingApprovals = 0;
-  if (currentUser.user_group === 1) {
-    pendingApprovals = (DB.jobs || []).filter(
-      j => j.merchantId === uid && j.status === 'pending'
-    ).length;
-  }
-
-  setBadge('notifBadge', unreadNotifs + pendingApprovals);
-  setBadge('chatBadge',  unreadChats);
-  syncBottomNavBadges();   // mirror counts to mobile bottom nav
-}
-
-function setBadge(id, count) {
-  const b = el(id);
-  if (b) { b.textContent = count; b.style.display = count > 0 ? 'flex' : 'none'; }
-}
-
-
-/* ═══════════════════════════════════════════════════════════
-   ADMIN PANEL
-   ═══════════════════════════════════════════════════════════ */
-function adminTab(tab) {
-  if (!DB || !DB.users) return;   // DB guaranteed by bootApp; no setTimeout needed
-
-  document.querySelectorAll('#sec-adminPanel .tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', ['pendingJobs','sellers','payments'][i] === tab);
-  });
-
-  const c = el('adminContent');
-  if (!c) return;
-
-  if (tab === 'pendingJobs') {
-    const pending = DB.jobs.filter(j =>
-      j.status === 'pending' &&
-      (currentUser.user_group === 0 || j.merchantId === currentUser.userId));
-    c.innerHTML = pending.length ? `
-      <div class="admin-table-wrap"><table class="admin-table">
-        <thead><tr><th>Title</th><th>Seller</th><th>Category</th><th>Scope</th><th>Actions</th></tr></thead>
-        <tbody>${pending.map(j => `
-          <tr>
-            <td>${escHtml(j.title)}</td><td>${escHtml(j.sellerId)}</td>
-            <td>${escHtml(j.category)}</td>
-            <td>${j.scope === 'global' ? '🌍 Public' : '🏛 Local'}</td>
-            <td class="action-btns">
-              <button class="btn-success" onclick="approveJob('${j.jobId}')">Approve</button>
-              <button class="btn-danger"  onclick="rejectJob('${j.jobId}')">Reject</button>
-            </td>
-          </tr>`).join('')}
-        </tbody></table></div>`
-    : '<div class="empty-state"><i class="fas fa-check-circle"></i><p>No pending jobs.</p></div>';
-
-  } else if (tab === 'sellers') {
-    const sellers = DB.users.filter(u =>
-      u.user_group === 2 &&
-      (currentUser.user_group === 0 || u.churchId === currentUser.userId));
-    c.innerHTML = sellers.length ? `
-      <div class="admin-table-wrap"><table class="admin-table">
-        <thead><tr><th>User ID</th><th>Email</th><th>Status</th><th>Subscribed</th><th>Actions</th></tr></thead>
-        <tbody>${sellers.map(s => `
-          <tr>
-            <td>${escHtml(s.userId)}</td><td>${escHtml(s.email||'')}</td>
-            <td><span class="status-badge status-${s.active?'active':'inactive'}">${s.active?'Active':'Inactive'}</span></td>
-            <td>${s.subscribed ? '✅' : '❌'}</td>
-            <td class="action-btns">
-              <button class="btn-${s.active?'danger':'success'}"
-                onclick="toggleUserActive('${s.userId}', () => adminTab('sellers'))">${s.active?'Deactivate':'Activate'}</button>
-            </td>
-          </tr>`).join('')}
-        </tbody></table></div>`
-    : '<div class="empty-state"><i class="fas fa-users"></i><p>No sellers found.</p></div>';
-
-  } else if (tab === 'payments') {
-    renderPaymentsTable('adminContent', currentUser.user_group === 0 ? null : currentUser.userId);
-  }
-}
-
-async function approveJob(jobId) {
-  await dbTransaction(db => {
-    const j = db.jobs.find(j => j.jobId === jobId);
-    if (j) { j.status = 'approved'; j.approvedAt = new Date().toISOString(); }
-  });
-  addNotification((DB.jobs.find(j => j.jobId === jobId)||{}).sellerId, 'Your listing has been approved!');
-  adminTab('pendingJobs');
-}
-
-async function rejectJob(jobId) {
-  const reason = prompt('Reason for rejection (optional):') || '';
-  await dbTransaction(db => {
-    const j = db.jobs.find(j => j.jobId === jobId);
-    if (j) { j.status = 'rejected'; j.rejectionReason = reason; }
-  });
-  addNotification((DB.jobs.find(j => j.jobId === jobId)||{}).sellerId,
-    `Your listing was rejected. Reason: ${reason}`);
-  adminTab('pendingJobs');
-}
-
-async function toggleUserActive(userId, refreshCallback) {
-  await dbTransaction(db => {
-    const u = db.users.find(u => u.userId === userId);
-    if (u) u.active = !u.active;
-  });
-  if (typeof refreshCallback === 'function') {
-    refreshCallback();
-  } else {
-    adminTab('sellers');   // safe default
-  }
 }
 
 
@@ -1719,10 +1702,20 @@ function superTab(tab) {
     const merchants = DB.users.filter(u => u.user_group === 1);
     c.innerHTML = merchants.length ? `
       <div class="admin-table-wrap"><table class="admin-table">
-        <thead><tr><th>Church</th><th>Leader</th><th>Commission %</th><th>Access</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>${merchants.map(m => `
+        <thead><tr>
+          <th>Church</th><th>Type</th><th>Leader</th>
+          <th>Commission %</th><th>Access</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${merchants.map(m => {
+          // ── NEW: backward-compat default — old records without churchType → 'head'
+          const cType = m.churchType || 'head';
+          const typeLabel = cType === 'head'
+            ? '<span class="status-badge" style="background:var(--blue);color:#fff;">🏛 Head</span>'
+            : '<span class="status-badge" style="background:var(--orange);color:#fff;">🌿 Branch</span>';
+          return `
           <tr>
-            <td>${escHtml(m.churchName||m.userId)}</td>
+            <td>${escHtml(churchDisplayName(m))}</td>
+            <td>${typeLabel}</td>
             <td>${escHtml(m.leader||'')}</td>
             <td><input type="number" value="${m.commissionPct||10}" style="width:60px"
                  onchange="setCommission('${m.userId}',this.value)"/></td>
@@ -1732,7 +1725,8 @@ function superTab(tab) {
               <button class="btn-${m.active?'danger':'success'}"
                 onclick="toggleUserActive('${m.userId}', () => superTab('merchants'))">${m.active?'Deactivate':'Activate'}</button>
             </td>
-          </tr>`).join('')}
+          </tr>`;
+        }).join('')}
         </tbody></table></div>`
     : '<div class="empty-state"><i class="fas fa-church"></i><p>No churches registered.</p></div>';
 
